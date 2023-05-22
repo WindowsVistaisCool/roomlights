@@ -8,12 +8,13 @@ FASTLED_USING_NAMESPACE
 /*                         Init Consts                          */
 /****************************************************************/
 
-#define EEPROM_MODE_ADDRESS 0
+#define EEPROM_MODE_ADDRESS 0 // Used to check and set the current program
+#define EEPROM_LOCK_ADDRESS 1 // Used for bypassing program change on future resets
 #define DATA_PIN            3
 #define CLK_PIN             5
 #define LED_TYPE            WS2801
 #define COLOR_ORDER         BGR
-#define NUM_LEDS            32
+#define NUM_LEDS            64
 CRGB leds[NUM_LEDS];
 
 #define BRIGHTNESS          255
@@ -23,31 +24,46 @@ CRGB leds[NUM_LEDS];
 /*                    Program setup & config                    */
 /****************************************************************/
 
+typedef void(*callable)(void);
 void empty(){} // empty func for setup and fps overrides
 void normalFPS(){ // default FPS used by most programs
   FastLED.show();
   FastLED.delay(1000/FRAMES_PER_SECOND);
 }
-const int funcMax = 3; // highest index of modes
-void (*modes[])(void) {
-  dot,
-  rainbow,
-  Fire2012,
-  waves
+void serialCmdEmpty(String command) { Serial.println("There are no avaliable commands for this program!"); }
+
+const unsigned int funcMax = 4; // highest index of modes
+
+struct Program {
+  void (*runtime)(void);
+  void (*setup)(void);
+  void (*fps)(void);
+  void (*parseCommands)(String);
+
+  Program(callable run, callable setupCommand, callable fpsOverride, callable serialCommands) {
+    runtime = run;
+    setup = setupCommand;
+    fps = fpsOverride;
+    parseCommands = serialCommands;
+  }
 };
-void (*modeSetup[])(void){
-  empty,
-  empty,
-  Fire2012Setup,
-  empty
+
+Program programs[] = {
+  { dot,        empty,          normalFPS,  serialCmdEmpty },
+  { rainbow,    empty,          empty,      rainbow_serial },
+  { rainbow2,   empty,          empty,      serialCmdEmpty },
+  { Fire2012,   Fire2012Setup,  normalFPS,  serialCmdEmpty },
+  { waves,      empty,          empty,      serialCmdEmpty },
+  { nullptr,    nullptr,        nullptr,    nullptr },
+  { nullptr,    nullptr,        nullptr,    nullptr },
+  { nullptr,    nullptr,        nullptr,    nullptr },
+  { backnforth, empty,          normalFPS,  serialCmdEmpty}
 };
-void (*fpsOverrides[])(void){
-  normalFPS,
-  empty,
-  normalFPS,
-  empty
-};
-unsigned int funcIndex; // index of function to call retreived by EEPROM
+
+unsigned short funcIndex; // index of function to call retreived by EEPROM
+unsigned short lockState;
+Program currentProgram = Program(nullptr, nullptr, nullptr, nullptr);
+String lastSerialCommand = "help";
 
 /*****************************************************************/
 /*                      Program constants                        */
@@ -76,25 +92,65 @@ void setup() {
   Serial.begin(9600);
   Serial.println("READY");
 
+  lockState = EEPROM.read(EEPROM_LOCK_ADDRESS);
   funcIndex = EEPROM.read(EEPROM_MODE_ADDRESS); // read last known function
   Serial.println(funcIndex);
 
-  funcIndex = funcIndex == funcMax ? 0 : funcIndex + 1; // set next function
-  EEPROM.update(EEPROM_MODE_ADDRESS, funcIndex);
-  Serial.println(funcIndex);
-  // funcIndex = funcMax; // DEBUG - testing latest function
+  if (lockState == 0) {
+    funcIndex = funcIndex >= funcMax ? 0 : funcIndex + 1; // set next function
+    EEPROM.update(EEPROM_MODE_ADDRESS, funcIndex);
+    Serial.println(funcIndex);
+    // funcIndex = funcMax; // DEBUG - testing latest function
+  }
+
+  currentProgram = programs[funcIndex];
 
   delay(2000); // wait for LED init
 
   FastLED.addLeds<LED_TYPE,DATA_PIN,CLK_PIN,COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
   FastLED.setBrightness(BRIGHTNESS);
 
-  modeSetup[funcIndex](); // run current program setup (if any)
+  currentProgram.setup(); // run current program setup (if any)
+}
+
+void parseSerialCommands(String incomingData) {
+  if (!incomingData.startsWith("l")){ lastSerialCommand = incomingData; }
+  if (incomingData.startsWith("help")) {
+    Serial.println("Avaliable Commands: togglechange, set <int>");
+  } else if (incomingData.startsWith("togglechange")) {
+    lockState = lockState == 1 ? 0 : 1;
+    EEPROM.update(EEPROM_LOCK_ADDRESS, lockState);
+    if (lockState == 1) { EEPROM.update(EEPROM_MODE_ADDRESS, funcIndex); }
+    Serial.println(lockState);
+  } else if (incomingData.startsWith("set ")) {
+    uint8_t value = incomingData.substring(4).toInt();
+    funcIndex = value;
+    currentProgram = programs[funcIndex];
+    currentProgram.setup();
+    if (lockState == 1) { EEPROM.update(EEPROM_MODE_ADDRESS, funcIndex); }
+    // Serial.println("Set program to: " + value);
+  } else if (incomingData.startsWith("pause")) {
+    // FastLED.clear(true);
+    while (Serial.available() == 0) {} // Want to stop the runtime and fps tick instead
+  } else if (incomingData.startsWith("clear")) {
+    FastLED.clear(true);
+    delay(1000);
+  } else if (incomingData.startsWith("cmd ")) {
+    currentProgram.parseCommands(incomingData.substring(4));
+  } else if (incomingData.startsWith("l")) {
+    parseSerialCommands(lastSerialCommand);
+  } else if (incomingData.startsWith("bright")) {
+    FastLED.setBrightness(incomingData.substring(7).toInt());
+  } else {
+    Serial.println("Unknown command. Type 'help' for help.");
+  }
 }
 
 void loop() {
-  modes[funcIndex](); // program loop runtime
-  fpsOverrides[funcIndex](); // fps delay (unless overriden) [default normalFPS()]
+  if (Serial.available() > 0) { parseSerialCommands(Serial.readString()); }
+
+  currentProgram.runtime(); // program loop runtime
+  currentProgram.fps(); // fps delay (unless overriden) [default normalFPS()]
 }
 
 /*****************************************************************/
@@ -124,9 +180,60 @@ void rainbow() {
 
   FastLED.show();
 
-  FastLED.delay(1000/(FRAMES_PER_SECOND/2));
+  FastLED.delay(1000/(FRAMES_PER_SECOND*2));
 
   EVERY_N_MILLISECONDS( 20 ) { gHue++; }
+}
+void rainbow_serial(String command) {
+  if (command.startsWith("hue ")) {
+    gHue = command.substring(4).toInt();
+  } else {
+    Serial.println("Unknown Program Command");
+  }
+}
+
+/*===============================================================*/
+
+void rainbow2() {
+  static uint16_t sPseudotime = 0;
+  static uint16_t sLastMillis = 0;
+  static uint16_t sHue16 = 0;
+ 
+  uint8_t sat8 = beatsin88( 87, 220, 250);
+  uint8_t brightdepth = beatsin88( 341, 96, 224);
+  uint16_t brightnessthetainc16 = beatsin88( 203, (25 * 256), (40 * 256));
+  uint8_t msmultiplier = beatsin88(147, 23, 60);
+
+  uint16_t hue16 = sHue16;//gHue * 256;
+  uint16_t hueinc16 = beatsin88(113, 1, 3000);
+  
+  uint16_t ms = millis();
+  uint16_t deltams = ms - sLastMillis ;
+  sLastMillis  = ms;
+  sPseudotime += deltams * msmultiplier;
+  sHue16 += deltams * beatsin88( 400, 5,9);
+  uint16_t brightnesstheta16 = sPseudotime;
+  
+  for( uint16_t i = 0 ; i < NUM_LEDS; i++) {
+    hue16 += hueinc16;
+    uint8_t hue8 = hue16 / 256;
+
+    brightnesstheta16  += brightnessthetainc16;
+    uint16_t b16 = sin16( brightnesstheta16  ) + 32768;
+
+    uint16_t bri16 = (uint32_t)((uint32_t)b16 * (uint32_t)b16) / 65536;
+    uint8_t bri8 = (uint32_t)(((uint32_t)bri16) * brightdepth) / 65536;
+    bri8 += (255 - brightdepth);
+    
+    CRGB newcolor = CHSV( hue8, sat8, bri8);
+    
+    uint16_t pixelnumber = i;
+    pixelnumber = (NUM_LEDS-1) - pixelnumber;
+    
+    nblend( leds[pixelnumber], newcolor, 64);
+  }
+
+  FastLED.show();
 }
 
 /*===============================================================*/
