@@ -8,6 +8,8 @@ FASTLED_USING_NAMESPACE
 /*                         Init Consts                          */
 /****************************************************************/
 
+#define PROGRAM_BUTTON      12
+
 #define EEPROM_MODE_ADDRESS 0 // Used to check and set the current program
 #define EEPROM_LOCK_ADDRESS 1 // Used for bypassing program change on future resets
 #define DATA_PIN            3
@@ -32,8 +34,6 @@ void normalFPS(){ // default FPS used by most programs
 }
 void serialCmdEmpty(String command) { Serial.println("There are no avaliable commands for this program!"); }
 
-const unsigned int funcMax = 4; // highest index of modes
-
 struct Program {
   void (*runtime)(void);
   void (*setup)(void);
@@ -48,7 +48,8 @@ struct Program {
   }
 };
 
-Program programs[] = {
+// TODO: turn programsets into stuct
+Program programSet0[] = {
   { dot,        empty,          normalFPS,  serialCmdEmpty },
   { rainbow,    empty,          empty,      rainbow_serial },
   { rainbow2,   empty,          empty,      serialCmdEmpty },
@@ -56,13 +57,32 @@ Program programs[] = {
   { waves,      empty,          empty,      serialCmdEmpty },
   { nullptr,    nullptr,        nullptr,    nullptr },
   { nullptr,    nullptr,        nullptr,    nullptr },
+  { nullptr,    nullptr,        nullptr,    nullptr }
+};
+Program programSet1[] = {
+  { backnforth, empty,          normalFPS,  rainbow_serial },
   { nullptr,    nullptr,        nullptr,    nullptr },
-  { backnforth, empty,          normalFPS,  serialCmdEmpty}
+  { nullptr,    nullptr,        nullptr,    nullptr },
+  { nullptr,    nullptr,        nullptr,    nullptr },
+  { nullptr,    nullptr,        nullptr,    nullptr },
+  { nullptr,    nullptr,        nullptr,    nullptr },
+  { nullptr,    nullptr,        nullptr,    nullptr },
+  { nullptr,    nullptr,        nullptr,    nullptr }
 };
 
-unsigned short funcIndex; // index of function to call retreived by EEPROM
-unsigned short lockState;
-Program currentProgram = Program(nullptr, nullptr, nullptr, nullptr);
+unsigned short funcIndex = 0; // index of function to call retreived by EEPROM
+// unsigned short lockState;
+unsigned short currentProgramSet = 0;
+const unsigned int programSetMaxMap[] = {
+  4,
+  0
+};
+Program programSetMap[][8] = {
+  { programSet0[0], programSet0[1], programSet0[2], programSet0[3], programSet0[4], programSet0[5], programSet0[6], programSet0[7] },
+  { programSet1[0], programSet1[1], programSet1[2], programSet1[3], programSet1[4], programSet1[5], programSet1[6], programSet1[7] }
+};
+unsigned int funcMax = programSetMaxMap[currentProgramSet]; // highest index of modes
+Program currentProgram = programSetMap[currentProgramSet][4];
 String lastSerialCommand = "help";
 
 /*****************************************************************/
@@ -74,13 +94,16 @@ int globalConstants[8];
 
 uint8_t gHue = 0;
 
-CRGBPalette16 wavesConstants[3] = {
+CRGBPalette16 wavesConstants[6] = {
   { 0x000507, 0x000409, 0x00030B, 0x00030D, 0x000210, 0x000212, 0x000114, 0x000117, 
     0x000019, 0x00001C, 0x000026, 0x000031, 0x00003B, 0x000046, 0x14554B, 0x28AA50 },
   { 0x000507, 0x000409, 0x00030B, 0x00030D, 0x000210, 0x000212, 0x000114, 0x000117, 
     0x000019, 0x00001C, 0x000026, 0x000031, 0x00003B, 0x000046, 0x0C5F52, 0x19BE5F },
   { 0x000208, 0x00030E, 0x000514, 0x00061A, 0x000820, 0x000927, 0x000B2D, 0x000C33, 
-    0x000E39, 0x001040, 0x001450, 0x001860, 0x001C70, 0x002080, 0x1040BF, 0x2060FF }
+    0x000E39, 0x001040, 0x001450, 0x001860, 0x001C70, 0x002080, 0x1040BF, 0x2060FF },
+  { },
+  {},
+  {}
 };
 
 /*****************************************************************/
@@ -88,22 +111,26 @@ CRGBPalette16 wavesConstants[3] = {
 /*****************************************************************/
 
 void setup() {
+  pinMode(PROGRAM_BUTTON, INPUT);
+  digitalWrite(PROGRAM_BUTTON, HIGH);
+
   // Serial used for debugging current program
   Serial.begin(9600);
   Serial.println("READY");
 
-  lockState = EEPROM.read(EEPROM_LOCK_ADDRESS);
-  funcIndex = EEPROM.read(EEPROM_MODE_ADDRESS); // read last known function
-  Serial.println(funcIndex);
+  // lockState = EEPROM.read(EEPROM_LOCK_ADDRESS);
+  // funcIndex = EEPROM.read(EEPROM_MODE_ADDRESS); // read last known function
+  // Serial.println(funcIndex);
 
-  if (lockState == 0) {
-    funcIndex = funcIndex >= funcMax ? 0 : funcIndex + 1; // set next function
-    EEPROM.update(EEPROM_MODE_ADDRESS, funcIndex);
-    Serial.println(funcIndex);
-    // funcIndex = funcMax; // DEBUG - testing latest function
-  }
+  // if (lockState == 0) {
+  //   funcIndex = funcIndex >= funcMax ? 0 : funcIndex + 1; // set next function
+  //   // EEPROM.update(EEPROM_MODE_ADDRESS, funcIndex);
+  //   Serial.println(funcIndex);
+  //   // funcIndex = funcMax; // DEBUG - testing latest function
+  // }
 
-  currentProgram = programs[funcIndex];
+  funcIndex = 4;
+  currentProgram = programSetMap[currentProgramSet][funcIndex];
 
   delay(2000); // wait for LED init
 
@@ -118,16 +145,17 @@ void parseSerialCommands(String incomingData) {
   if (incomingData.startsWith("help")) {
     Serial.println("Avaliable Commands: togglechange, set <int>");
   } else if (incomingData.startsWith("togglechange")) {
-    lockState = lockState == 1 ? 0 : 1;
-    EEPROM.update(EEPROM_LOCK_ADDRESS, lockState);
-    if (lockState == 1) { EEPROM.update(EEPROM_MODE_ADDRESS, funcIndex); }
-    Serial.println(lockState);
+    // lockState = lockState == 1 ? 0 : 1;
+    // EEPROM.update(EEPROM_LOCK_ADDRESS, lockState);
+    // if (lockState == 1) { EEPROM.update(EEPROM_MODE_ADDRESS, funcIndex); }
+    // Serial.println(lockState);
+    Serial.println("Depracated.");
   } else if (incomingData.startsWith("set ")) {
     uint8_t value = incomingData.substring(4).toInt();
     funcIndex = value;
-    currentProgram = programs[funcIndex];
+    currentProgram = programSetMap[currentProgramSet][funcIndex];
     currentProgram.setup();
-    if (lockState == 1) { EEPROM.update(EEPROM_MODE_ADDRESS, funcIndex); }
+    // if (lockState == 1) { EEPROM.update(EEPROM_MODE_ADDRESS, funcIndex); }
     // Serial.println("Set program to: " + value);
   } else if (incomingData.startsWith("pause")) {
     // FastLED.clear(true);
@@ -146,8 +174,41 @@ void parseSerialCommands(String incomingData) {
   }
 }
 
+bool awaitingButton = false;
+unsigned short buttonState = 1;
+
+void parseProgramButton(unsigned short buttonState) {
+  delay(50); // debounce time
+
+  delay(250); // time to differentiate between short and long button presses
+  if (awaitingButton && digitalRead(PROGRAM_BUTTON) == 0) {
+    // do something every 500ms until the button is depressed
+    Serial.println("Wait");
+    delay(500);
+  } else if (!awaitingButton && digitalRead(PROGRAM_BUTTON) == 0) {
+    // long press of button
+    awaitingButton = true; // used to later check if button is still pressed
+    FastLED.clear();
+    delay(350);
+    currentProgramSet = currentProgramSet == 1 ? 0 : 1;
+    funcMax = programSetMaxMap[currentProgramSet];
+    currentProgram = programSetMap[currentProgramSet][0];
+    currentProgram.setup();
+  } else if (!awaitingButton) {
+    // short press of button
+    FastLED.clear();
+    funcIndex = funcIndex >= funcMax ? 0 : funcIndex + 1;
+    Serial.println(funcIndex);
+    currentProgram = programSetMap[currentProgramSet][funcIndex];
+    currentProgram.setup();
+  }
+}
+
 void loop() {
+  buttonState = digitalRead(PROGRAM_BUTTON);
   if (Serial.available() > 0) { parseSerialCommands(Serial.readString()); }
+  if (buttonState == 0) { parseProgramButton(buttonState); }
+  else { awaitingButton = false; }
 
   currentProgram.runtime(); // program loop runtime
   currentProgram.fps(); // fps delay (unless overriden) [default normalFPS()]
