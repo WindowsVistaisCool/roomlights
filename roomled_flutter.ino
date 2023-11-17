@@ -1,4 +1,10 @@
-// LED Programs and Cycler by Kyle Rush, May 2023
+/*
+* Led program cycler
+* 
+* Written by Kyle Rush
+* Updated November 2023
+*/
+
 #include <FastLED.h>
 #include <EEPROM.h>
 
@@ -8,26 +14,34 @@ FASTLED_USING_NAMESPACE
 /*                         Init Consts                          */
 /****************************************************************/
 
-#define PROGRAM_BUTTON      12
+#define PROGRAM_BUTTON          12
+#define SECONDARY_BUTTON        11
 
-#define EEPROM_MODE_ADDRESS 0 // Used to check and set the current program
-#define EEPROM_LOCK_ADDRESS 1 // Used for bypassing program change on future resets
-#define DATA_PIN            3
-#define CLK_PIN             5
-#define LED_TYPE            WS2801
-#define COLOR_ORDER         BGR
-#define NUM_LEDS            64
+#define EEPROM_MODE_ADDRESS     0 // Used to check and set the current program
+#define EEPROM_PROGSET_ADDRESS  1 // Used to get current program set from last known program
+#define DATA_PIN                3
+#define CLK_PIN                 5
+#define LED_TYPE                WS2801
+#define COLOR_ORDER             BGR
+#define NUM_LEDS                64
 CRGB leds[NUM_LEDS];
 
-#define BRIGHTNESS          255
-#define FRAMES_PER_SECOND   120
+#define BRIGHTNESS              255
+#define FRAMES_PER_SECOND       120
+
+#define BUTTON_DEBOUNCE_MS      50
+#define BUTTON_LONGDELAY_MS     350
+
+#define EEPROM_ENABLED
+// #define DEBUG_ENABLED
+// TODO: implement allowing disable of eeprom
+// TODO: add flags for disabling buttons
 
 /****************************************************************/
 /*                    Program setup & config                    */
 /****************************************************************/
 
 typedef void(*callable)(void);
-void empty(){} // empty func for setup and fps overrides
 void normalFPS(){ // default FPS used by most programs
   FastLED.show();
   FastLED.delay(1000/FRAMES_PER_SECOND);
@@ -48,51 +62,62 @@ struct Program {
   }
 };
 
+Program initProgram = { setupSequenceLED, [](){}, [](){}, serialCmdEmpty };
 // TODO: turn programsets into stuct
 Program programSet0[] = {
-  { dot,        empty,          normalFPS,  serialCmdEmpty },
-  { rainbow,    empty,          empty,      rainbow_serial },
-  { rainbow2,   empty,          empty,      serialCmdEmpty },
-  { Fire2012,   Fire2012Setup,  normalFPS,  serialCmdEmpty },
-  { waves,      empty,          empty,      serialCmdEmpty },
-  { nullptr,    nullptr,        nullptr,    nullptr },
-  { nullptr,    nullptr,        nullptr,    nullptr },
-  { nullptr,    nullptr,        nullptr,    nullptr }
+  { dot,              [](){},         normalFPS,  dot_serial     },
+  { rainbow,          [](){},         [](){},     rainbow_serial },
+  { waves,            [](){},         [](){},     serialCmdEmpty },
+  { nullptr,          nullptr,        nullptr,    nullptr },
+  { nullptr,          nullptr,        nullptr,    nullptr },
+  { nullptr,          nullptr,        nullptr,    nullptr },
+  { nullptr,          nullptr,        nullptr,    nullptr },
+  { nullptr,          nullptr,        nullptr,    nullptr }
 };
 Program programSet1[] = {
-  { backnforth, empty,          normalFPS,  rainbow_serial },
-  { nullptr,    nullptr,        nullptr,    nullptr },
-  { nullptr,    nullptr,        nullptr,    nullptr },
-  { nullptr,    nullptr,        nullptr,    nullptr },
-  { nullptr,    nullptr,        nullptr,    nullptr },
-  { nullptr,    nullptr,        nullptr,    nullptr },
-  { nullptr,    nullptr,        nullptr,    nullptr },
-  { nullptr,    nullptr,        nullptr,    nullptr }
+  { backnforth,       [](){},         normalFPS,  rainbow_serial },
+  { Fire2012,         Fire2012Setup,  normalFPS,  serialCmdEmpty },
+  { rainbow2,         [](){},         [](){},     serialCmdEmpty },
+  { song,             [](){},         [](){},     serialCmdEmpty },
+  { nullptr,          nullptr,        nullptr,    nullptr },
+  { nullptr,          nullptr,        nullptr,    nullptr },
+  { nullptr,          nullptr,        nullptr,    nullptr },
+  { nullptr,          nullptr,        nullptr,    nullptr }
 };
 
 unsigned short funcIndex = 0; // index of function to call retreived by EEPROM
-// unsigned short lockState;
-unsigned short currentProgramSet = 0;
-const unsigned int programSetMaxMap[] = {
-  4,
-  0
-};
+unsigned short currentProgramSet = 0; // current program set retrieved by EEPROM
+unsigned short programSetMax = 1;
+const unsigned int programSetMaxMap[] = { 2, 2 };
 Program programSetMap[][8] = {
   { programSet0[0], programSet0[1], programSet0[2], programSet0[3], programSet0[4], programSet0[5], programSet0[6], programSet0[7] },
   { programSet1[0], programSet1[1], programSet1[2], programSet1[3], programSet1[4], programSet1[5], programSet1[6], programSet1[7] }
 };
 unsigned int funcMax = programSetMaxMap[currentProgramSet]; // highest index of modes
-Program currentProgram = programSetMap[currentProgramSet][4];
+Program currentProgram = programSetMap[currentProgramSet][funcIndex];
+
+void setProgram(unsigned short programSet, short program) {
+  currentProgramSet = programSet;
+  funcMax = programSetMaxMap[currentProgramSet];
+  funcIndex = program <= 0 || program > funcMax ? 0 : program;
+  currentProgram = programSetMap[currentProgramSet][program];
+  // return currentProgram;
+}
+// void swapProgramBank(short program) {
+//   currentProgramSet = currentProgramSet >= programSetMax ? 0 : currentProgramSet + 1;
+//   return setProgram(currentProgramSet, program);
+// }
+
 String lastSerialCommand = "help";
 
 /*****************************************************************/
 /*                      Program constants                        */
 /*****************************************************************/
 
-int globals[8];
-int globalConstants[8];
+int globalConstants[8]; // TODO: remove
 
 uint8_t gHue = 0;
+uint8_t gSaturation = 200;
 
 CRGBPalette16 wavesConstants[6] = {
   { 0x000507, 0x000409, 0x00030B, 0x00030D, 0x000210, 0x000212, 0x000114, 0x000117, 
@@ -101,10 +126,13 @@ CRGBPalette16 wavesConstants[6] = {
     0x000019, 0x00001C, 0x000026, 0x000031, 0x00003B, 0x000046, 0x0C5F52, 0x19BE5F },
   { 0x000208, 0x00030E, 0x000514, 0x00061A, 0x000820, 0x000927, 0x000B2D, 0x000C33, 
     0x000E39, 0x001040, 0x001450, 0x001860, 0x001C70, 0x002080, 0x1040BF, 0x2060FF },
-  { },
+  {},
   {},
   {}
 };
+
+const int songData[] = {};
+// const unsigned float songDataLength[] = {};
 
 /*****************************************************************/
 /*                         Setup & Loop                          */
@@ -113,47 +141,41 @@ CRGBPalette16 wavesConstants[6] = {
 void setup() {
   pinMode(PROGRAM_BUTTON, INPUT);
   digitalWrite(PROGRAM_BUTTON, HIGH);
+  pinMode(SECONDARY_BUTTON, INPUT);
+  digitalWrite(SECONDARY_BUTTON, HIGH);
 
-  // Serial used for debugging current program
+  #ifdef DEBUG_ENABLED
   Serial.begin(9600);
-  Serial.println("READY");
+  #endif
 
-  // lockState = EEPROM.read(EEPROM_LOCK_ADDRESS);
-  // funcIndex = EEPROM.read(EEPROM_MODE_ADDRESS); // read last known function
-  // Serial.println(funcIndex);
-
-  // if (lockState == 0) {
-  //   funcIndex = funcIndex >= funcMax ? 0 : funcIndex + 1; // set next function
-  //   // EEPROM.update(EEPROM_MODE_ADDRESS, funcIndex);
-  //   Serial.println(funcIndex);
-  //   // funcIndex = funcMax; // DEBUG - testing latest function
-  // }
-
-  funcIndex = 4;
-  currentProgram = programSetMap[currentProgramSet][funcIndex];
-
-  delay(2000); // wait for LED init
+  delay(250); // wait for LED init
 
   FastLED.addLeds<LED_TYPE,DATA_PIN,CLK_PIN,COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
   FastLED.setBrightness(BRIGHTNESS);
 
+  currentProgram = initProgram;
   currentProgram.setup(); // run current program setup (if any)
 }
 
+#ifdef DEBUG_ENABLED
 void parseSerialCommands(String incomingData) {
   if (!incomingData.startsWith("l")){ lastSerialCommand = incomingData; }
   if (incomingData.startsWith("help")) {
-    Serial.println("Avaliable Commands: togglechange, set <int>");
-  } else if (incomingData.startsWith("togglechange")) {
+    Serial.println("Avaliable Commands: pause, clear, set <int>, cmd <cmd>, l, bright <int>");
+  } /*else if (incomingData.startsWith("togglechange")) {
     // lockState = lockState == 1 ? 0 : 1;
-    // EEPROM.update(EEPROM_LOCK_ADDRESS, lockState);
+    // EEPROM.update(EEPROM_PROGSET_ADDRESS, 0);
     // if (lockState == 1) { EEPROM.update(EEPROM_MODE_ADDRESS, funcIndex); }
-    // Serial.println(lockState);
-    Serial.println("Depracated.");
+    // Serial.println();
+  } */
+  else if (incomingData.startsWith("bank ")) {
+    uint8_t value = incomingData.substring(5).toInt();
+    currentProgramSet = programSetMap[value];
+    setProgram(currentProgramSet, -1);
+    currentProgram.setup();
   } else if (incomingData.startsWith("set ")) {
     uint8_t value = incomingData.substring(4).toInt();
-    funcIndex = value;
-    currentProgram = programSetMap[currentProgramSet][funcIndex];
+    setProgram(currentProgramSet, value);
     currentProgram.setup();
     // if (lockState == 1) { EEPROM.update(EEPROM_MODE_ADDRESS, funcIndex); }
     // Serial.println("Set program to: " + value);
@@ -162,7 +184,7 @@ void parseSerialCommands(String incomingData) {
     while (Serial.available() == 0) {} // Want to stop the runtime and fps tick instead
   } else if (incomingData.startsWith("clear")) {
     FastLED.clear(true);
-    delay(1000);
+    delay(500);
   } else if (incomingData.startsWith("cmd ")) {
     currentProgram.parseCommands(incomingData.substring(4));
   } else if (incomingData.startsWith("l")) {
@@ -173,65 +195,156 @@ void parseSerialCommands(String incomingData) {
     Serial.println("Unknown command. Type 'help' for help.");
   }
 }
+#endif
 
-bool awaitingButton = false;
-unsigned short buttonState = 1;
+bool awaitingButton1 = false; // set true when detecting long presses
+bool deadButton1 = false; // used to ignore parsing the button (after action completed until released again)
+unsigned short buttonState1 = 1;
+bool awaitingButton2 = false;
+bool deadButton2 = false;
+unsigned short buttonState2 = 1;
 
-void parseProgramButton(unsigned short buttonState) {
-  delay(50); // debounce time
+// TODO: revise this whole button system i dont like it
+void parseProgramButton() {
+  delay(BUTTON_DEBOUNCE_MS); // debounce time (not really needed for this style of button but whatever)
+  if (deadButton1) { return; }
 
-  delay(250); // time to differentiate between short and long button presses
-  if (awaitingButton && digitalRead(PROGRAM_BUTTON) == 0) {
-    // do something every 500ms until the button is depressed
-    Serial.println("Wait");
-    delay(500);
-  } else if (!awaitingButton && digitalRead(PROGRAM_BUTTON) == 0) {
-    // long press of button
-    awaitingButton = true; // used to later check if button is still pressed
-    FastLED.clear();
-    delay(350);
-    currentProgramSet = currentProgramSet == 1 ? 0 : 1;
-    funcMax = programSetMaxMap[currentProgramSet];
-    currentProgram = programSetMap[currentProgramSet][0];
-    currentProgram.setup();
-  } else if (!awaitingButton) {
+  delay(BUTTON_LONGDELAY_MS); // time to differentiate between short and long button presses
+  if (awaitingButton1 && digitalRead(PROGRAM_BUTTON) == 0) {
+    // actually wait 1000ms then ignore button until it is depressed ~~do something every 500ms until the button is depressed~~
+    delay(900);
+    deadButton1 = true;
+
+    #ifdef EEPROM_ENABLED
+    EEPROM.update(EEPROM_MODE_ADDRESS, (uint8_t)funcIndex);
+    EEPROM.update(EEPROM_PROGSET_ADDRESS, (uint8_t)currentProgramSet);
+    #endif
+    for (int i=0;i<2;i++){
+      // TODO: make a chasing pattern with all leds
+      fill_solid(leds, 16, CRGB(100,100,100));
+      FastLED.show();
+      delay(250);
+      fill_solid(leds, 16, CRGB(0,0,0));
+      FastLED.show();
+      delay(200);
+    }
+  } else if (!awaitingButton1 && digitalRead(PROGRAM_BUTTON) == 0) {
+    // little bit of a funny but this is here i guess idk what im thinking tbh
+    awaitingButton1 = true; // used to later check if button is still pressed
+    
+  } else if (!awaitingButton1) {
     // short press of button
     FastLED.clear();
     funcIndex = funcIndex >= funcMax ? 0 : funcIndex + 1;
-    Serial.println(funcIndex);
+    setProgram(currentProgramSet, funcIndex);
+    currentProgram.setup();
+  }
+}
+void parseSecondaryButton() {
+  delay(BUTTON_DEBOUNCE_MS);
+  if (deadButton2) { return; }
+
+  delay(BUTTON_LONGDELAY_MS);
+  if (awaitingButton2 && digitalRead(SECONDARY_BUTTON) == 0) {
+    deadButton2 = true;
+    delay(300);
+
+    FastLED.clear();
+    funcIndex = 0;
+    currentProgramSet = currentProgramSet >= programSetMax ? 0 : currentProgramSet + 1;
+    funcMax = programSetMaxMap[currentProgramSet];
+    // TODO: update eeprom
     currentProgram = programSetMap[currentProgramSet][funcIndex];
     currentProgram.setup();
+
+  } else if (!awaitingButton2 && digitalRead(SECONDARY_BUTTON) == 0) {
+    awaitingButton2 = true;
+  } else if (!awaitingButton2) {
+    // TODO: run current program button press method (also todo)
   }
 }
 
 void loop() {
-  buttonState = digitalRead(PROGRAM_BUTTON);
+  buttonState1 = digitalRead(PROGRAM_BUTTON);
+  buttonState2 = digitalRead(SECONDARY_BUTTON);
+
+  #ifdef DEBUG_ENABLED
   if (Serial.available() > 0) { parseSerialCommands(Serial.readString()); }
-  if (buttonState == 0) { parseProgramButton(buttonState); }
-  else { awaitingButton = false; }
+  #endif
+
+  if (buttonState1 == 0 && !deadButton1) {
+    parseProgramButton();
+  } else if (buttonState1 == 1) {
+    awaitingButton1 = false;
+    deadButton1 = false;
+  }
+  if (buttonState2 == 0 && !deadButton2) {
+    parseSecondaryButton();
+  } else if (buttonState2 == 1) {
+    awaitingButton2 = false;
+    deadButton2 = false;
+  }
 
   currentProgram.runtime(); // program loop runtime
   currentProgram.fps(); // fps delay (unless overriden) [default normalFPS()]
 }
 
 /*****************************************************************/
-/*                       Helper Functions                        */
-/*****************************************************************/
-
-int boolConverter(bool b){
-  return b ? 1 : 0;
-}
-
-/*****************************************************************/
 /*                           Programs                            */
 /*****************************************************************/
+
+void setupSequenceLED() {
+  static uint8_t currentLedIndex = 0;
+  static bool startFadeOut = false;
+  currentLedIndex = currentLedIndex >= NUM_LEDS ? 0 : currentLedIndex + 1;
+  
+  if (startFadeOut && currentLedIndex == 0) {
+    // Swap to program from EEPROM
+
+    FastLED.clear();
+
+    #ifdef EEPROM_ENABLED
+    setProgram(
+      EEPROM.read(EEPROM_PROGSET_ADDRESS),
+      EEPROM.read(EEPROM_MODE_ADDRESS)
+    );
+    #else
+    setProgram(0, 1);
+    #endif
+
+    startFadeOut = false;
+
+    currentProgram.setup();
+
+  } else if (currentLedIndex != 0) {
+    if (startFadeOut) {
+      fill_solid(leds, NUM_LEDS, CRGB((NUM_LEDS - currentLedIndex), (NUM_LEDS - currentLedIndex), (NUM_LEDS - currentLedIndex)));
+    } else {
+      fill_solid(leds, currentLedIndex, CRGB(NUM_LEDS, NUM_LEDS, NUM_LEDS));
+    }
+
+    FastLED.show();
+    FastLED.delay(500/FRAMES_PER_SECOND);
+  } else if (!startFadeOut && currentLedIndex == 0) {
+    startFadeOut = true;
+  }
+}
+
+/*===============================================================*/
 
 void dot() {
   fadeToBlackBy( leds, NUM_LEDS, 10);
   int pos = random16(NUM_LEDS);
-  leds[pos] += CHSV( gHue + random8(64), 200, 255);
+  leds[pos] += CHSV( gHue + random8(64), gSaturation, 255);
 
   EVERY_N_MILLISECONDS( 20 ) { gHue++; }
+}
+void dot_serial(String command) {
+  if (command.startsWith("sat ")) {
+    gSaturation = command.substring(4).toInt();
+  } else {
+    Serial.println("Unkown Program Comamnd");
+  }
 }
 
 /*===============================================================*/
@@ -380,23 +493,22 @@ void waves()
   fill_solid( leds, NUM_LEDS, CRGB( 2, 6, 10));
 
   // Render each of four layers, with different scales and speeds, that vary over time
-  pacifica_one_layer( wavesConstants[0], sCIStart1, beatsin16( 3, 11 * 256, 14 * 256), beatsin8( 10, 70, 130), 0-beat16( 301) );
-  pacifica_one_layer( wavesConstants[1], sCIStart2, beatsin16( 4,  6 * 256,  9 * 256), beatsin8( 17, 40,  80), beat16( 401) );
-  pacifica_one_layer( wavesConstants[2], sCIStart3, 6 * 256, beatsin8( 9, 10,38), 0-beat16(503));
-  pacifica_one_layer( wavesConstants[2], sCIStart4, 5 * 256, beatsin8( 8, 10,28), beat16(601));
+  waves_one_layer( wavesConstants[0], sCIStart1, beatsin16( 3, 11 * 256, 14 * 256), beatsin8( 10, 70, 130), 0-beat16( 301) );
+  waves_one_layer( wavesConstants[1], sCIStart2, beatsin16( 4,  6 * 256,  9 * 256), beatsin8( 17, 40,  80), beat16( 401) );
+  waves_one_layer( wavesConstants[2], sCIStart3, 6 * 256, beatsin8( 9, 10,38), 0-beat16(503));
+  waves_one_layer( wavesConstants[2], sCIStart4, 5 * 256, beatsin8( 8, 10,28), beat16(601));
 
   // Add brighter 'whitecaps' where the waves lines up more
-  pacifica_add_whitecaps();
+  waves_add_whitecaps();
 
   // Deepen the blues and greens a bit
-  pacifica_deepen_colors();
+  waves_deepen_colors();
 
   FastLED.show();
   FastLED.delay(20);
 }
-
 // Add one layer of waves into the led array
-void pacifica_one_layer( CRGBPalette16& p, uint16_t cistart, uint16_t wavescale, uint8_t bri, uint16_t ioff)
+void waves_one_layer( CRGBPalette16& p, uint16_t cistart, uint16_t wavescale, uint8_t bri, uint16_t ioff)
 {
   uint16_t ci = cistart;
   uint16_t waveangle = ioff;
@@ -412,9 +524,8 @@ void pacifica_one_layer( CRGBPalette16& p, uint16_t cistart, uint16_t wavescale,
     leds[i] += c;
   }
 }
-
 // Add extra 'white' to areas where the four layers of light have lined up brightly
-void pacifica_add_whitecaps()
+void waves_add_whitecaps()
 {
   uint8_t basethreshold = beatsin8( 9, 55, 65);
   uint8_t wave = beat8( 7 );
@@ -430,13 +541,24 @@ void pacifica_add_whitecaps()
     }
   }
 }
-
 // Deepen the blues and greens
-void pacifica_deepen_colors()
+void waves_deepen_colors()
 {
   for( uint16_t i = 0; i < NUM_LEDS; i++) {
     leds[i].blue = scale8( leds[i].blue,  145); 
     leds[i].green= scale8( leds[i].green, 200); 
     leds[i] |= CRGB( 2, 5, 7);
   }
+}
+
+/*===============================================================*/
+
+void song() {
+
+}
+
+/*===============================================================*/
+
+void polyMetronome() {
+
 }
