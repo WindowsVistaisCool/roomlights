@@ -2,7 +2,8 @@
 * Led program cycler
 * 
 * Written by Kyle Rush
-* Updated November 2023
+* Created May 2023
+* Updated December 2024 :)
 */
 
 #include <FastLED.h>
