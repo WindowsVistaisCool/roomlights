@@ -31,9 +31,9 @@ CRGB leds[NUM_LEDS];
 #define BUTTON_DEBOUNCE_MS      50
 #define BUTTON_LONGDELAY_MS     350
 
-// #define BUTTONS_ENABLED
-// #define EEPROM_ENABLED
-#define DEBUG_ENABLED
+#define BUTTONS_ENABLED
+#define EEPROM_ENABLED
+// #define DEBUG_ENABLED
 // TODO: implement allowing disable of eeprom
 // TODO: add flags for disabling buttons
 
@@ -700,7 +700,7 @@ void strobe() {
 void holidayTwinkleSetup() {
   globalConstants[0] = 6; // TWINKLE_SPEED 1-8
   globalConstants[1] = 6; // TWINKLE_DENSITY 1-8
-  globalConstants[2] = 10; // SECONDS_PER_PALLETTE
+  globalConstants[2] = 60; // SECONDS_PER_PALLETTE
   globalConstants[3] = 0; // AUTO_SELECT_BACKGROUND_COLOR
   globalConstants[4] = 1; // COOL_LIKE_INCANDESCENT
 
